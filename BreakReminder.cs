@@ -13,8 +13,8 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("A multi-monitor full-screen break reminder")]
 [assembly: AssemblyCompany("Local")]
 [assembly: AssemblyProduct("Take Rest")]
-[assembly: AssemblyVersion("2.1.0.0")]
-[assembly: AssemblyFileVersion("2.1.0.0")]
+[assembly: AssemblyVersion("2.2.0.0")]
+[assembly: AssemblyFileVersion("2.2.0.0")]
 
 namespace BreakReminder
 {
@@ -350,10 +350,15 @@ namespace BreakReminder
         private Bitmap renderedBackground;
         private bool allowClose;
 
-        public BreakOverlayForm(Screen screen, Image background, Action onExitRequested)
+        public BreakOverlayForm(
+            Screen screen,
+            Image background,
+            Bitmap preparedBackground,
+            Action onExitRequested)
         {
             screenBounds = screen.Bounds;
             backgroundImage = background;
+            renderedBackground = preparedBackground;
             exitRequested = onExitRequested;
 
             Text = "Take Rest";
@@ -377,10 +382,6 @@ namespace BreakReminder
 
             KeyDown += OverlayKeyDown;
             FormClosing += OverlayFormClosing;
-            if (renderedBackground == null)
-            {
-                RebuildBackgroundCache();
-            }
         }
 
         protected override CreateParams CreateParams
@@ -392,23 +393,6 @@ namespace BreakReminder
                 parameters.ExStyle |= ToolWindow;
                 return parameters;
             }
-        }
-
-        protected override void OnResize(EventArgs e)
-        {
-            base.OnResize(e);
-            RebuildBackgroundCache();
-        }
-
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing && renderedBackground != null)
-            {
-                renderedBackground.Dispose();
-                renderedBackground = null;
-            }
-
-            base.Dispose(disposing);
         }
 
         protected override bool ProcessCmdKey(ref Message message, Keys keyData)
@@ -434,7 +418,7 @@ namespace BreakReminder
             }
             else
             {
-                DrawBackground(e.Graphics);
+                DrawBackground(e.Graphics, backgroundImage, ClientSize);
             }
 
             DrawBreakContent(e.Graphics);
@@ -467,16 +451,16 @@ namespace BreakReminder
             Close();
         }
 
-        private void RebuildBackgroundCache()
+        public static Bitmap CreateBackgroundCache(Image background, Size targetSize)
         {
-            if (ClientSize.Width <= 0 || ClientSize.Height <= 0)
+            if (targetSize.Width <= 0 || targetSize.Height <= 0)
             {
-                return;
+                return null;
             }
 
             Bitmap next = new Bitmap(
-                ClientSize.Width,
-                ClientSize.Height,
+                targetSize.Width,
+                targetSize.Height,
                 System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
             using (Graphics graphics = Graphics.FromImage(next))
             {
@@ -484,59 +468,54 @@ namespace BreakReminder
                 graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
                 graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 graphics.SmoothingMode = SmoothingMode.HighQuality;
-                DrawBackground(graphics);
+                DrawBackground(graphics, background, targetSize);
 
                 using (LinearGradientBrush shade = new LinearGradientBrush(
-                    ClientRectangle,
+                    new Rectangle(Point.Empty, targetSize),
                     Color.FromArgb(35, 3, 11, 24),
                     Color.FromArgb(100, 3, 10, 23),
                     LinearGradientMode.Vertical))
                 {
-                    graphics.FillRectangle(shade, ClientRectangle);
+                    graphics.FillRectangle(shade, new Rectangle(Point.Empty, targetSize));
                 }
             }
 
-            Bitmap previous = renderedBackground;
-            renderedBackground = next;
-            if (previous != null)
-            {
-                previous.Dispose();
-            }
+            return next;
         }
 
-        private void DrawBackground(Graphics graphics)
+        private static void DrawBackground(Graphics graphics, Image background, Size targetSize)
         {
-            if (backgroundImage == null)
+            if (background == null)
             {
                 using (LinearGradientBrush fallback = new LinearGradientBrush(
-                    ClientRectangle,
+                    new Rectangle(Point.Empty, targetSize),
                     Color.FromArgb(62, 102, 150),
                     Color.FromArgb(13, 28, 51),
                     25F))
                 {
-                    graphics.FillRectangle(fallback, ClientRectangle);
+                    graphics.FillRectangle(fallback, new Rectangle(Point.Empty, targetSize));
                 }
                 return;
             }
 
-            float imageRatio = (float)backgroundImage.Width / backgroundImage.Height;
-            float targetRatio = (float)ClientSize.Width / ClientSize.Height;
+            float imageRatio = (float)background.Width / background.Height;
+            float targetRatio = (float)targetSize.Width / targetSize.Height;
             RectangleF destination;
 
             if (imageRatio > targetRatio)
             {
-                float height = ClientSize.Height;
+                float height = targetSize.Height;
                 float width = height * imageRatio;
-                destination = new RectangleF((ClientSize.Width - width) / 2F, 0F, width, height);
+                destination = new RectangleF((targetSize.Width - width) / 2F, 0F, width, height);
             }
             else
             {
-                float width = ClientSize.Width;
+                float width = targetSize.Width;
                 float height = width / imageRatio;
-                destination = new RectangleF(0F, (ClientSize.Height - height) / 2F, width, height);
+                destination = new RectangleF(0F, (targetSize.Height - height) / 2F, width, height);
             }
 
-            graphics.DrawImage(backgroundImage, destination);
+            graphics.DrawImage(background, destination);
         }
 
         private void DrawBreakContent(Graphics graphics)
@@ -723,6 +702,7 @@ namespace BreakReminder
         private readonly ContextMenuStrip menu = new ContextMenuStrip();
         private readonly ToolTip toolTip = new ToolTip();
         private readonly List<BreakOverlayForm> breakOverlays = new List<BreakOverlayForm>();
+        private readonly Dictionary<string, Bitmap> backgroundCaches = new Dictionary<string, Bitmap>();
 
         private DateTime nextBreakAt;
         private DateTime breakEndsAt;
@@ -761,6 +741,7 @@ namespace BreakReminder
             Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
 
             breakBackground = LoadBreakBackground();
+            PrepareBackgroundCaches();
             BuildMenu();
             BuildFloatingPanel();
 
@@ -1123,6 +1104,33 @@ namespace BreakReminder
             }
         }
 
+        private void PrepareBackgroundCaches()
+        {
+            foreach (Screen screen in Screen.AllScreens)
+            {
+                GetBackgroundCache(screen);
+            }
+        }
+
+        private Bitmap GetBackgroundCache(Screen screen)
+        {
+            string key = String.Format(
+                "{0}x{1}",
+                screen.Bounds.Width,
+                screen.Bounds.Height);
+            Bitmap cached;
+            if (backgroundCaches.TryGetValue(key, out cached))
+            {
+                return cached;
+            }
+
+            cached = BreakOverlayForm.CreateBackgroundCache(
+                breakBackground,
+                screen.Bounds.Size);
+            backgroundCaches.Add(key, cached);
+            return cached;
+        }
+
         private void ExitApplication()
         {
             if (isBreakActive)
@@ -1167,6 +1175,7 @@ namespace BreakReminder
                 BreakOverlayForm overlay = new BreakOverlayForm(
                     screen,
                     breakBackground,
+                    GetBackgroundCache(screen),
                     RequestBreakExit);
                 overlay.UpdateCountdown(TimeSpan.FromSeconds(BreakSeconds));
                 breakOverlays.Add(overlay);
@@ -1352,6 +1361,14 @@ namespace BreakReminder
                 breakBackground.Dispose();
                 breakBackground = null;
             }
+            foreach (Bitmap cachedBackground in backgroundCaches.Values)
+            {
+                if (cachedBackground != null)
+                {
+                    cachedBackground.Dispose();
+                }
+            }
+            backgroundCaches.Clear();
             toolTip.Dispose();
         }
 
