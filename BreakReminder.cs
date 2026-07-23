@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Text;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -12,8 +13,8 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("A multi-monitor full-screen break reminder")]
 [assembly: AssemblyCompany("Local")]
 [assembly: AssemblyProduct("Take Rest")]
-[assembly: AssemblyVersion("2.0.0.0")]
-[assembly: AssemblyFileVersion("2.0.0.0")]
+[assembly: AssemblyVersion("2.1.0.0")]
+[assembly: AssemblyFileVersion("2.1.0.0")]
 
 namespace BreakReminder
 {
@@ -340,10 +341,13 @@ namespace BreakReminder
 
     internal sealed class BreakOverlayForm : Form
     {
+        private const double BreakDurationMilliseconds = 60D * 1000D;
         private readonly Rectangle screenBounds;
         private readonly Image backgroundImage;
         private readonly Action exitRequested;
-        private string countdownText = "01:00";
+        private string countdownText = "01:00.00";
+        private double remainingProgress = 1D;
+        private Bitmap renderedBackground;
         private bool allowClose;
 
         public BreakOverlayForm(Screen screen, Image background, Action onExitRequested)
@@ -373,6 +377,10 @@ namespace BreakReminder
 
             KeyDown += OverlayKeyDown;
             FormClosing += OverlayFormClosing;
+            if (renderedBackground == null)
+            {
+                RebuildBackgroundCache();
+            }
         }
 
         protected override CreateParams CreateParams
@@ -384,6 +392,23 @@ namespace BreakReminder
                 parameters.ExStyle |= ToolWindow;
                 return parameters;
             }
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            RebuildBackgroundCache();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && renderedBackground != null)
+            {
+                renderedBackground.Dispose();
+                renderedBackground = null;
+            }
+
+            base.Dispose(disposing);
         }
 
         protected override bool ProcessCmdKey(ref Message message, Keys keyData)
@@ -400,18 +425,16 @@ namespace BreakReminder
         protected override void OnPaintBackground(PaintEventArgs e)
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            e.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            e.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            e.Graphics.CompositingQuality = CompositingQuality.HighQuality;
+            e.Graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
 
-            DrawBackground(e.Graphics);
-
-            using (LinearGradientBrush shade = new LinearGradientBrush(
-                ClientRectangle,
-                Color.FromArgb(38, 3, 11, 24),
-                Color.FromArgb(115, 3, 10, 23),
-                LinearGradientMode.Vertical))
+            if (renderedBackground != null)
             {
-                e.Graphics.FillRectangle(shade, ClientRectangle);
+                e.Graphics.DrawImageUnscaled(renderedBackground, 0, 0);
+            }
+            else
+            {
+                DrawBackground(e.Graphics);
             }
 
             DrawBreakContent(e.Graphics);
@@ -426,21 +449,59 @@ namespace BreakReminder
             BringToFront();
         }
 
-        public void UpdateCountdown(string value)
+        public void UpdateCountdown(TimeSpan remaining)
         {
-            if (countdownText == value)
-            {
-                return;
-            }
-
-            countdownText = value;
-            Invalidate();
+            double milliseconds = Math.Max(0D, remaining.TotalMilliseconds);
+            long totalCentiseconds = (long)Math.Ceiling(milliseconds / 10D);
+            long minutes = totalCentiseconds / 6000L;
+            long seconds = (totalCentiseconds / 100L) % 60L;
+            long hundredths = totalCentiseconds % 100L;
+            countdownText = String.Format("{0:00}:{1:00}.{2:00}", minutes, seconds, hundredths);
+            remainingProgress = Math.Max(0D, Math.Min(1D, milliseconds / BreakDurationMilliseconds));
+            Invalidate(GetContentBounds());
         }
 
         public void CloseOverlay()
         {
             allowClose = true;
             Close();
+        }
+
+        private void RebuildBackgroundCache()
+        {
+            if (ClientSize.Width <= 0 || ClientSize.Height <= 0)
+            {
+                return;
+            }
+
+            Bitmap next = new Bitmap(
+                ClientSize.Width,
+                ClientSize.Height,
+                System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+            using (Graphics graphics = Graphics.FromImage(next))
+            {
+                graphics.CompositingQuality = CompositingQuality.HighQuality;
+                graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                graphics.SmoothingMode = SmoothingMode.HighQuality;
+                DrawBackground(graphics);
+
+                using (LinearGradientBrush shade = new LinearGradientBrush(
+                    ClientRectangle,
+                    Color.FromArgb(35, 3, 11, 24),
+                    Color.FromArgb(100, 3, 10, 23),
+                    LinearGradientMode.Vertical))
+                {
+                    graphics.FillRectangle(shade, ClientRectangle);
+                }
+            }
+
+            Bitmap previous = renderedBackground;
+            renderedBackground = next;
+            if (previous != null)
+            {
+                previous.Dispose();
+            }
         }
 
         private void DrawBackground(Graphics graphics)
@@ -485,7 +546,7 @@ namespace BreakReminder
                 Math.Min((float)ClientSize.Width / 1920F, (float)ClientSize.Height / 1080F));
 
             float panelWidth = Math.Min(ClientSize.Width * 0.46F, 780F * scale);
-            float panelHeight = Math.Min(ClientSize.Height * 0.70F, 520F * scale);
+            float panelHeight = Math.Min(ClientSize.Height * 0.66F, 405F * scale);
             float panelCenterX = ClientSize.Width * 0.28F;
             float panelCenterY = ClientSize.Height * 0.50F;
             RectangleF panel = new RectangleF(
@@ -504,9 +565,8 @@ namespace BreakReminder
 
             using (StringFormat center = new StringFormat())
             using (Font titleFont = new Font("Microsoft YaHei UI", 34F * scale, FontStyle.Bold, GraphicsUnit.Pixel))
-            using (Font timerFont = new Font("Segoe UI Light", 122F * scale, FontStyle.Regular, GraphicsUnit.Pixel))
+            using (Font timerFont = new Font("Segoe UI Light", 100F * scale, FontStyle.Regular, GraphicsUnit.Pixel))
             using (Font hintFont = new Font("Microsoft YaHei UI", 18F * scale, FontStyle.Regular, GraphicsUnit.Pixel))
-            using (Font hotkeyFont = new Font("Microsoft YaHei UI", 15F * scale, FontStyle.Bold, GraphicsUnit.Pixel))
             using (SolidBrush primaryText = new SolidBrush(Color.FromArgb(246, 250, 255)))
             using (SolidBrush timerText = new SolidBrush(Color.FromArgb(105, 219, 255)))
             using (SolidBrush secondaryText = new SolidBrush(Color.FromArgb(216, 229, 244)))
@@ -516,41 +576,78 @@ namespace BreakReminder
 
                 RectangleF titleBounds = new RectangleF(
                     panel.X,
-                    panel.Y + (55F * scale),
+                    panel.Y + (40F * scale),
                     panel.Width,
                     58F * scale);
                 graphics.DrawString("休息一下", titleFont, primaryText, titleBounds, center);
 
                 RectangleF timerBounds = new RectangleF(
                     panel.X,
-                    panel.Y + (125F * scale),
+                    panel.Y + (105F * scale),
                     panel.Width,
-                    150F * scale);
+                    130F * scale);
                 graphics.DrawString(countdownText, timerFont, timerText, timerBounds, center);
+
+                float progressHeight = Math.Max(8F, 8F * scale);
+                RectangleF progressTrack = new RectangleF(
+                    panel.X + (72F * scale),
+                    panel.Y + (260F * scale),
+                    panel.Width - (144F * scale),
+                    progressHeight);
+                using (GraphicsPath trackPath = MakeRoundedRectangle(progressTrack, progressHeight / 2F))
+                using (SolidBrush trackFill = new SolidBrush(Color.FromArgb(62, 255, 255, 255)))
+                {
+                    graphics.FillPath(trackFill, trackPath);
+                }
+
+                if (remainingProgress > 0D)
+                {
+                    float progressWidth = Math.Max(
+                        progressHeight,
+                        progressTrack.Width * (float)remainingProgress);
+                    RectangleF progressFillBounds = new RectangleF(
+                        progressTrack.X,
+                        progressTrack.Y,
+                        Math.Min(progressTrack.Width, progressWidth),
+                        progressHeight);
+                    using (GraphicsPath progressPath = MakeRoundedRectangle(
+                        progressFillBounds,
+                        progressHeight / 2F))
+                    using (LinearGradientBrush progressFill = new LinearGradientBrush(
+                        progressFillBounds,
+                        Color.FromArgb(81, 211, 255),
+                        Color.FromArgb(132, 102, 255),
+                        0F))
+                    {
+                        graphics.FillPath(progressFill, progressPath);
+                    }
+                }
 
                 RectangleF hintBounds = new RectangleF(
                     panel.X,
-                    panel.Y + (292F * scale),
+                    panel.Y + (300F * scale),
                     panel.Width,
                     48F * scale);
-                graphics.DrawString("看看远处，放松眼睛和肩颈", hintFont, secondaryText, hintBounds, center);
-
-                RectangleF hotkeyBounds = new RectangleF(
-                    panelCenterX - (165F * scale),
-                    panel.Y + (378F * scale),
-                    330F * scale,
-                    58F * scale);
-                using (GraphicsPath hotkeyPath = MakeRoundedRectangle(hotkeyBounds, 18F * scale))
-                using (LinearGradientBrush hotkeyFill = new LinearGradientBrush(
-                    hotkeyBounds,
-                    Color.FromArgb(210, 50, 177, 239),
-                    Color.FromArgb(210, 105, 88, 235),
-                    0F))
-                {
-                    graphics.FillPath(hotkeyFill, hotkeyPath);
-                }
-                graphics.DrawString("Ctrl + U  提前结束", hotkeyFont, primaryText, hotkeyBounds, center);
+                graphics.DrawString("论文是暂时的，眼睛是一辈子的", hintFont, secondaryText, hintBounds, center);
             }
+        }
+
+        private Rectangle GetContentBounds()
+        {
+            float scale = Math.Max(
+                0.72F,
+                Math.Min((float)ClientSize.Width / 1920F, (float)ClientSize.Height / 1080F));
+            float panelWidth = Math.Min(ClientSize.Width * 0.46F, 780F * scale);
+            float panelHeight = Math.Min(ClientSize.Height * 0.66F, 405F * scale);
+            float panelCenterX = ClientSize.Width * 0.28F;
+            float panelCenterY = ClientSize.Height * 0.50F;
+            Rectangle bounds = Rectangle.Ceiling(new RectangleF(
+                panelCenterX - (panelWidth / 2F),
+                panelCenterY - (panelHeight / 2F),
+                panelWidth,
+                panelHeight));
+            bounds.Inflate((int)Math.Ceiling(3F * scale), (int)Math.Ceiling(3F * scale));
+            return bounds;
         }
 
         private void OverlayKeyDown(object sender, KeyEventArgs e)
@@ -891,11 +988,9 @@ namespace BreakReminder
                     return;
                 }
 
-                int seconds = Math.Max(0, (int)Math.Ceiling(remaining.TotalSeconds));
-                string countdown = String.Format("{0:00}:{1:00}", seconds / 60, seconds % 60);
                 foreach (BreakOverlayForm overlay in breakOverlays)
                 {
-                    overlay.UpdateCountdown(countdown);
+                    overlay.UpdateCountdown(remaining);
                 }
                 return;
             }
@@ -1049,6 +1144,7 @@ namespace BreakReminder
             floatingBounds = Bounds;
             isBreakActive = true;
             breakEndsAt = DateTime.Now.AddSeconds(BreakSeconds);
+            timer.Interval = 16;
             Hide();
             notifyIcon.Visible = false;
 
@@ -1072,6 +1168,7 @@ namespace BreakReminder
                     screen,
                     breakBackground,
                     RequestBreakExit);
+                overlay.UpdateCountdown(TimeSpan.FromSeconds(BreakSeconds));
                 breakOverlays.Add(overlay);
                 overlay.ShowOverlay();
             }
@@ -1103,6 +1200,7 @@ namespace BreakReminder
             }
 
             isBreakActive = false;
+            timer.Interval = 200;
             floatingPanel.Visible = true;
             floatingPanel.BringToFront();
             BackColor = Color.FromArgb(23, 29, 41);
