@@ -15,6 +15,7 @@ if (-not $compiler) {
     /reference:System.dll `
     /reference:System.Drawing.dll `
     /reference:System.Windows.Forms.dll `
+    "/resource:$projectDirectory\assets\break-background.jpg,BreakReminder.Background.jpg" `
     "/win32manifest:$projectDirectory\app.manifest" `
     "/out:$projectDirectory\BreakReminder.exe" `
     "$projectDirectory\BreakReminder.cs"

@@ -1,17 +1,19 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: AssemblyTitle("Break Reminder")]
-[assembly: AssemblyDescription("A lightweight full-screen break reminder")]
+[assembly: AssemblyTitle("Take Rest")]
+[assembly: AssemblyDescription("A multi-monitor full-screen break reminder")]
 [assembly: AssemblyCompany("Local")]
-[assembly: AssemblyProduct("Break Reminder")]
-[assembly: AssemblyVersion("1.2.0.0")]
-[assembly: AssemblyFileVersion("1.2.0.0")]
+[assembly: AssemblyProduct("Take Rest")]
+[assembly: AssemblyVersion("2.0.0.0")]
+[assembly: AssemblyFileVersion("2.0.0.0")]
 
 namespace BreakReminder
 {
@@ -336,6 +338,271 @@ namespace BreakReminder
         }
     }
 
+    internal sealed class BreakOverlayForm : Form
+    {
+        private readonly Rectangle screenBounds;
+        private readonly Image backgroundImage;
+        private readonly Action exitRequested;
+        private string countdownText = "01:00";
+        private bool allowClose;
+
+        public BreakOverlayForm(Screen screen, Image background, Action onExitRequested)
+        {
+            screenBounds = screen.Bounds;
+            backgroundImage = background;
+            exitRequested = onExitRequested;
+
+            Text = "Take Rest";
+            FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.Manual;
+            Bounds = screenBounds;
+            BackColor = Color.FromArgb(8, 16, 30);
+            ForeColor = Color.White;
+            TopMost = true;
+            ShowInTaskbar = false;
+            KeyPreview = true;
+            DoubleBuffered = true;
+            AutoScaleMode = AutoScaleMode.None;
+
+            SetStyle(
+                ControlStyles.AllPaintingInWmPaint |
+                ControlStyles.OptimizedDoubleBuffer |
+                ControlStyles.ResizeRedraw |
+                ControlStyles.UserPaint,
+                true);
+
+            KeyDown += OverlayKeyDown;
+            FormClosing += OverlayFormClosing;
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                const int ToolWindow = 0x00000080;
+                CreateParams parameters = base.CreateParams;
+                parameters.ExStyle |= ToolWindow;
+                return parameters;
+            }
+        }
+
+        protected override bool ProcessCmdKey(ref Message message, Keys keyData)
+        {
+            if (keyData == (Keys.Control | Keys.U))
+            {
+                RequestExit();
+                return true;
+            }
+
+            return base.ProcessCmdKey(ref message, keyData);
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            e.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            e.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+
+            DrawBackground(e.Graphics);
+
+            using (LinearGradientBrush shade = new LinearGradientBrush(
+                ClientRectangle,
+                Color.FromArgb(38, 3, 11, 24),
+                Color.FromArgb(115, 3, 10, 23),
+                LinearGradientMode.Vertical))
+            {
+                e.Graphics.FillRectangle(shade, ClientRectangle);
+            }
+
+            DrawBreakContent(e.Graphics);
+        }
+
+        public void ShowOverlay()
+        {
+            Bounds = screenBounds;
+            Show();
+            Bounds = screenBounds;
+            TopMost = true;
+            BringToFront();
+        }
+
+        public void UpdateCountdown(string value)
+        {
+            if (countdownText == value)
+            {
+                return;
+            }
+
+            countdownText = value;
+            Invalidate();
+        }
+
+        public void CloseOverlay()
+        {
+            allowClose = true;
+            Close();
+        }
+
+        private void DrawBackground(Graphics graphics)
+        {
+            if (backgroundImage == null)
+            {
+                using (LinearGradientBrush fallback = new LinearGradientBrush(
+                    ClientRectangle,
+                    Color.FromArgb(62, 102, 150),
+                    Color.FromArgb(13, 28, 51),
+                    25F))
+                {
+                    graphics.FillRectangle(fallback, ClientRectangle);
+                }
+                return;
+            }
+
+            float imageRatio = (float)backgroundImage.Width / backgroundImage.Height;
+            float targetRatio = (float)ClientSize.Width / ClientSize.Height;
+            RectangleF destination;
+
+            if (imageRatio > targetRatio)
+            {
+                float height = ClientSize.Height;
+                float width = height * imageRatio;
+                destination = new RectangleF((ClientSize.Width - width) / 2F, 0F, width, height);
+            }
+            else
+            {
+                float width = ClientSize.Width;
+                float height = width / imageRatio;
+                destination = new RectangleF(0F, (ClientSize.Height - height) / 2F, width, height);
+            }
+
+            graphics.DrawImage(backgroundImage, destination);
+        }
+
+        private void DrawBreakContent(Graphics graphics)
+        {
+            float scale = Math.Max(
+                0.72F,
+                Math.Min((float)ClientSize.Width / 1920F, (float)ClientSize.Height / 1080F));
+
+            float panelWidth = Math.Min(ClientSize.Width * 0.46F, 780F * scale);
+            float panelHeight = Math.Min(ClientSize.Height * 0.70F, 520F * scale);
+            float panelCenterX = ClientSize.Width * 0.28F;
+            float panelCenterY = ClientSize.Height * 0.50F;
+            RectangleF panel = new RectangleF(
+                panelCenterX - (panelWidth / 2F),
+                panelCenterY - (panelHeight / 2F),
+                panelWidth,
+                panelHeight);
+
+            using (GraphicsPath panelPath = MakeRoundedRectangle(panel, 30F * scale))
+            using (SolidBrush panelFill = new SolidBrush(Color.FromArgb(105, 5, 15, 31)))
+            using (Pen panelEdge = new Pen(Color.FromArgb(58, 255, 255, 255), Math.Max(1F, scale)))
+            {
+                graphics.FillPath(panelFill, panelPath);
+                graphics.DrawPath(panelEdge, panelPath);
+            }
+
+            using (StringFormat center = new StringFormat())
+            using (Font titleFont = new Font("Microsoft YaHei UI", 34F * scale, FontStyle.Bold, GraphicsUnit.Pixel))
+            using (Font timerFont = new Font("Segoe UI Light", 122F * scale, FontStyle.Regular, GraphicsUnit.Pixel))
+            using (Font hintFont = new Font("Microsoft YaHei UI", 18F * scale, FontStyle.Regular, GraphicsUnit.Pixel))
+            using (Font hotkeyFont = new Font("Microsoft YaHei UI", 15F * scale, FontStyle.Bold, GraphicsUnit.Pixel))
+            using (SolidBrush primaryText = new SolidBrush(Color.FromArgb(246, 250, 255)))
+            using (SolidBrush timerText = new SolidBrush(Color.FromArgb(105, 219, 255)))
+            using (SolidBrush secondaryText = new SolidBrush(Color.FromArgb(216, 229, 244)))
+            {
+                center.Alignment = StringAlignment.Center;
+                center.LineAlignment = StringAlignment.Center;
+
+                RectangleF titleBounds = new RectangleF(
+                    panel.X,
+                    panel.Y + (55F * scale),
+                    panel.Width,
+                    58F * scale);
+                graphics.DrawString("休息一下", titleFont, primaryText, titleBounds, center);
+
+                RectangleF timerBounds = new RectangleF(
+                    panel.X,
+                    panel.Y + (125F * scale),
+                    panel.Width,
+                    150F * scale);
+                graphics.DrawString(countdownText, timerFont, timerText, timerBounds, center);
+
+                RectangleF hintBounds = new RectangleF(
+                    panel.X,
+                    panel.Y + (292F * scale),
+                    panel.Width,
+                    48F * scale);
+                graphics.DrawString("看看远处，放松眼睛和肩颈", hintFont, secondaryText, hintBounds, center);
+
+                RectangleF hotkeyBounds = new RectangleF(
+                    panelCenterX - (165F * scale),
+                    panel.Y + (378F * scale),
+                    330F * scale,
+                    58F * scale);
+                using (GraphicsPath hotkeyPath = MakeRoundedRectangle(hotkeyBounds, 18F * scale))
+                using (LinearGradientBrush hotkeyFill = new LinearGradientBrush(
+                    hotkeyBounds,
+                    Color.FromArgb(210, 50, 177, 239),
+                    Color.FromArgb(210, 105, 88, 235),
+                    0F))
+                {
+                    graphics.FillPath(hotkeyFill, hotkeyPath);
+                }
+                graphics.DrawString("Ctrl + U  提前结束", hotkeyFont, primaryText, hotkeyBounds, center);
+            }
+        }
+
+        private void OverlayKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Control && e.KeyCode == Keys.U)
+            {
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                RequestExit();
+                return;
+            }
+
+            if (e.KeyCode == Keys.Escape)
+            {
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+            }
+        }
+
+        private void RequestExit()
+        {
+            if (exitRequested != null)
+            {
+                exitRequested();
+            }
+        }
+
+        private void OverlayFormClosing(object sender, FormClosingEventArgs e)
+        {
+            if (!allowClose && e.CloseReason == CloseReason.UserClosing)
+            {
+                e.Cancel = true;
+            }
+        }
+
+        private static GraphicsPath MakeRoundedRectangle(RectangleF bounds, float radius)
+        {
+            float diameter = radius * 2F;
+            GraphicsPath path = new GraphicsPath();
+            RectangleF arc = new RectangleF(bounds.X, bounds.Y, diameter, diameter);
+            path.AddArc(arc, 180F, 90F);
+            arc.X = bounds.Right - diameter;
+            path.AddArc(arc, 270F, 90F);
+            arc.Y = bounds.Bottom - diameter;
+            path.AddArc(arc, 0F, 90F);
+            arc.X = bounds.Left;
+            path.AddArc(arc, 90F, 90F);
+            path.CloseFigure();
+            return path;
+        }
+    }
+
     internal sealed class ReminderForm : Form
     {
         private const int FloatingWidth = 360;
@@ -343,18 +610,22 @@ namespace BreakReminder
         private const int MinimumIntervalSeconds = 15 * 60;
         private const int MaximumIntervalSeconds = 20 * 60;
         private const int BreakSeconds = 60;
+        private const int BreakHotKeyId = 0x5452;
+        private const int WindowsHotKeyMessage = 0x0312;
+        private const uint ControlModifier = 0x0002;
+        private const uint NoRepeatModifier = 0x4000;
+        private const uint UKey = 0x55;
 
         private readonly Random random = new Random();
         private readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
         private readonly GradientCardPanel floatingPanel = new GradientCardPanel();
-        private readonly TableLayoutPanel breakPanel = new TableLayoutPanel();
         private readonly Label nextBreakLabel = new Label();
         private readonly Label remainingLabel = new Label();
-        private readonly Label countdownLabel = new Label();
         private readonly FocusProgressBar focusProgress = new FocusProgressBar();
         private readonly NotifyIcon notifyIcon = new NotifyIcon();
         private readonly ContextMenuStrip menu = new ContextMenuStrip();
         private readonly ToolTip toolTip = new ToolTip();
+        private readonly List<BreakOverlayForm> breakOverlays = new List<BreakOverlayForm>();
 
         private DateTime nextBreakAt;
         private DateTime breakEndsAt;
@@ -369,6 +640,8 @@ namespace BreakReminder
         private Rectangle floatingBounds;
         private Size floatingSize;
         private Icon trayIcon;
+        private Image breakBackground;
+        private bool breakHotKeyRegistered;
 
         public ReminderForm()
         {
@@ -390,18 +663,16 @@ namespace BreakReminder
             AutoScaleMode = AutoScaleMode.Dpi;
             Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
 
+            breakBackground = LoadBreakBackground();
             BuildMenu();
             BuildFloatingPanel();
-            BuildBreakPanel();
 
-            Controls.Add(breakPanel);
             Controls.Add(floatingPanel);
             ContextMenuStrip = menu;
 
             timer.Interval = 200;
             timer.Tick += TimerTick;
             Shown += FormShown;
-            KeyDown += FormKeyDown;
             FormClosing += FormIsClosing;
 
             ResumeLayout(false);
@@ -416,6 +687,19 @@ namespace BreakReminder
                 parameters.ClassStyle |= DropShadow;
                 return parameters;
             }
+        }
+
+        protected override void WndProc(ref Message message)
+        {
+            if (message.Msg == WindowsHotKeyMessage &&
+                message.WParam.ToInt32() == BreakHotKeyId &&
+                isBreakActive)
+            {
+                ReturnToFloating();
+                return;
+            }
+
+            base.WndProc(ref message);
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -458,11 +742,7 @@ namespace BreakReminder
             ToolStripMenuItem reset = new ToolStripMenuItem("重新开始计时");
             reset.Click += delegate
             {
-                if (isBreakActive)
-                {
-                    ReturnToFloating();
-                }
-                else
+                if (!isBreakActive)
                 {
                     ScheduleNextBreak();
                 }
@@ -591,72 +871,6 @@ namespace BreakReminder
             AttachDragHandlers(remainingLabel);
         }
 
-        private void BuildBreakPanel()
-        {
-            breakPanel.Dock = DockStyle.Fill;
-            breakPanel.BackColor = Color.FromArgb(8, 15, 27);
-            breakPanel.ColumnCount = 1;
-            breakPanel.RowCount = 5;
-            breakPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-            breakPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 24F));
-            breakPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 17F));
-            breakPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 27F));
-            breakPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 13F));
-            breakPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 19F));
-            breakPanel.Visible = false;
-
-            Label heading = MakeCenteredLabel("休息一下", 30F, FontStyle.Bold, Color.FromArgb(235, 242, 252));
-            heading.Dock = DockStyle.Fill;
-
-            countdownLabel.Dock = DockStyle.Fill;
-            countdownLabel.TextAlign = ContentAlignment.MiddleCenter;
-            countdownLabel.Font = new Font("Segoe UI Light", 70F, FontStyle.Regular, GraphicsUnit.Point);
-            countdownLabel.ForeColor = Color.FromArgb(93, 206, 255);
-            countdownLabel.Text = "01:00";
-
-            Label hint = MakeCenteredLabel("看看远处，放松眼睛和肩颈", 15F, FontStyle.Regular, Color.FromArgb(165, 180, 201));
-            hint.Dock = DockStyle.Fill;
-
-            Label exitHint = MakeCenteredLabel("倒计时结束后自动恢复", 9F, FontStyle.Regular, Color.FromArgb(91, 105, 126));
-            exitHint.Dock = DockStyle.Fill;
-
-            RoundedActionButton endBreakButton = new RoundedActionButton();
-            endBreakButton.Anchor = AnchorStyles.None;
-            endBreakButton.Size = new Size(170, 42);
-            endBreakButton.MinimumSize = new Size(170, 42);
-            endBreakButton.Font = new Font(Font.FontFamily, 9.5F, FontStyle.Bold);
-            endBreakButton.Text = "提前结束休息  Esc";
-            endBreakButton.Click += delegate { ReturnToFloating(); };
-
-            TableLayoutPanel footer = new TableLayoutPanel();
-            footer.Dock = DockStyle.Fill;
-            footer.BackColor = Color.Transparent;
-            footer.ColumnCount = 1;
-            footer.RowCount = 2;
-            footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-            footer.RowStyles.Add(new RowStyle(SizeType.Percent, 62F));
-            footer.RowStyles.Add(new RowStyle(SizeType.Percent, 38F));
-            footer.Controls.Add(endBreakButton, 0, 0);
-            footer.Controls.Add(exitHint, 0, 1);
-
-            breakPanel.Controls.Add(new Panel(), 0, 0);
-            breakPanel.Controls.Add(heading, 0, 1);
-            breakPanel.Controls.Add(countdownLabel, 0, 2);
-            breakPanel.Controls.Add(hint, 0, 3);
-            breakPanel.Controls.Add(footer, 0, 4);
-        }
-
-        private Label MakeCenteredLabel(string text, float size, FontStyle style, Color color)
-        {
-            Label label = new Label();
-            label.Text = text;
-            label.TextAlign = ContentAlignment.MiddleCenter;
-            label.Font = new Font(Font.FontFamily, size, style, GraphicsUnit.Point);
-            label.ForeColor = color;
-            label.BackColor = Color.Transparent;
-            return label;
-        }
-
         private void FormShown(object sender, EventArgs e)
         {
             floatingSize = ClientSize;
@@ -678,7 +892,11 @@ namespace BreakReminder
                 }
 
                 int seconds = Math.Max(0, (int)Math.Ceiling(remaining.TotalSeconds));
-                countdownLabel.Text = String.Format("{0:00}:{1:00}", seconds / 60, seconds % 60);
+                string countdown = String.Format("{0:00}:{1:00}", seconds / 60, seconds % 60);
+                foreach (BreakOverlayForm overlay in breakOverlays)
+                {
+                    overlay.UpdateCountdown(countdown);
+                }
                 return;
             }
 
@@ -734,16 +952,13 @@ namespace BreakReminder
 
         private void ShowFloatingFromTray()
         {
-            isHiddenToTray = false;
-            Show();
-
             if (isBreakActive)
             {
-                ShowInTaskbar = true;
-                BringToFront();
-                Activate();
                 return;
             }
+
+            isHiddenToTray = false;
+            Show();
 
             WindowState = FormWindowState.Normal;
             ShowInTaskbar = false;
@@ -797,18 +1012,29 @@ namespace BreakReminder
             }
         }
 
-        private void FormKeyDown(object sender, KeyEventArgs e)
+        private Image LoadBreakBackground()
         {
-            if (isBreakActive && e.KeyCode == Keys.Escape)
+            Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(
+                "BreakReminder.Background.jpg");
+            if (stream == null)
             {
-                e.Handled = true;
-                e.SuppressKeyPress = true;
-                ReturnToFloating();
+                return null;
+            }
+
+            using (stream)
+            using (Image source = Image.FromStream(stream))
+            {
+                return new Bitmap(source);
             }
         }
 
         private void ExitApplication()
         {
+            if (isBreakActive)
+            {
+                return;
+            }
+
             forceExit = true;
             Close();
         }
@@ -821,33 +1047,68 @@ namespace BreakReminder
             }
 
             floatingBounds = Bounds;
-            Screen targetScreen = Screen.FromRectangle(floatingBounds);
             isBreakActive = true;
-            Region = null;
-            floatingPanel.Visible = false;
-            breakPanel.Visible = true;
-            breakPanel.BringToFront();
-            BackColor = Color.FromArgb(8, 15, 27);
-            ShowInTaskbar = true;
-            Show();
-            Bounds = targetScreen.Bounds;
-            TopMost = true;
-            countdownLabel.Text = "01:00";
             breakEndsAt = DateTime.Now.AddSeconds(BreakSeconds);
-            notifyIcon.Text = "休息提醒：正在休息 01:00";
-            BringToFront();
-            Activate();
+            Hide();
+            notifyIcon.Visible = false;
+
+            breakHotKeyRegistered = RegisterHotKey(
+                Handle,
+                BreakHotKeyId,
+                ControlModifier | NoRepeatModifier,
+                UKey);
+            if (!breakHotKeyRegistered)
+            {
+                breakHotKeyRegistered = RegisterHotKey(
+                    Handle,
+                    BreakHotKeyId,
+                    ControlModifier,
+                    UKey);
+            }
+
+            foreach (Screen screen in Screen.AllScreens)
+            {
+                BreakOverlayForm overlay = new BreakOverlayForm(
+                    screen,
+                    breakBackground,
+                    RequestBreakExit);
+                breakOverlays.Add(overlay);
+                overlay.ShowOverlay();
+            }
+
+            if (breakOverlays.Count > 0)
+            {
+                breakOverlays[breakOverlays.Count - 1].Activate();
+            }
         }
 
         private void ReturnToFloating()
         {
+            if (!isBreakActive)
+            {
+                return;
+            }
+
+            foreach (BreakOverlayForm overlay in breakOverlays)
+            {
+                overlay.CloseOverlay();
+                overlay.Dispose();
+            }
+            breakOverlays.Clear();
+
+            if (breakHotKeyRegistered)
+            {
+                UnregisterHotKey(Handle, BreakHotKeyId);
+                breakHotKeyRegistered = false;
+            }
+
             isBreakActive = false;
-            breakPanel.Visible = false;
             floatingPanel.Visible = true;
             floatingPanel.BringToFront();
             BackColor = Color.FromArgb(23, 29, 41);
             ShowInTaskbar = false;
             ClientSize = floatingSize;
+            notifyIcon.Visible = true;
 
             if (IsOnAnyScreen(floatingBounds))
             {
@@ -869,6 +1130,11 @@ namespace BreakReminder
                 BringToFront();
             }
             Invalidate();
+        }
+
+        private void RequestBreakExit()
+        {
+            ReturnToFloating();
         }
 
         private bool IsOnAnyScreen(Rectangle rectangle)
@@ -961,11 +1227,21 @@ namespace BreakReminder
             if (isBreakActive && !forceExit && e.CloseReason == CloseReason.UserClosing)
             {
                 e.Cancel = true;
-                ReturnToFloating();
                 return;
             }
 
             timer.Stop();
+            foreach (BreakOverlayForm overlay in breakOverlays)
+            {
+                overlay.CloseOverlay();
+                overlay.Dispose();
+            }
+            breakOverlays.Clear();
+            if (breakHotKeyRegistered)
+            {
+                UnregisterHotKey(Handle, BreakHotKeyId);
+                breakHotKeyRegistered = false;
+            }
             notifyIcon.Visible = false;
             notifyIcon.Dispose();
             if (trayIcon != null)
@@ -973,8 +1249,19 @@ namespace BreakReminder
                 trayIcon.Dispose();
                 trayIcon = null;
             }
+            if (breakBackground != null)
+            {
+                breakBackground.Dispose();
+                breakBackground = null;
+            }
             toolTip.Dispose();
         }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool RegisterHotKey(IntPtr windowHandle, int id, uint modifiers, uint virtualKey);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool UnregisterHotKey(IntPtr windowHandle, int id);
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool DestroyIcon(IntPtr handle);
